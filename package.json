@@ -1,0 +1,13 @@
+{
+  "name": "insta-scrap",
+  "version": "1.0.0",
+  "description": "Instagram post image viewer with drag-and-drop and download support",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0"
+  }
+}

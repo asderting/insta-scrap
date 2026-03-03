@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Insta-Scrap</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>Insta-Scrap</h1>
+        <p class="subtitle">
+          Paste an Instagram post link to view, download, or drag &amp; drop
+          images
+        </p>
+      </header>
+
+      <form id="url-form">
+        <div class="input-group">
+          <input
+            type="url"
+            id="url-input"
+            placeholder="https://www.instagram.com/p/ABC123/"
+            required
+            autocomplete="off"
+          />
+          <button type="submit" id="fetch-btn">
+            <span class="btn-text">Fetch Images</span>
+            <span class="btn-spinner hidden"></span>
+          </button>
+        </div>
+        <p class="hint">Supports /p/, /reel/, and /tv/ links</p>
+      </form>
+
+      <div id="error-msg" class="error hidden"></div>
+
+      <div id="results" class="results hidden">
+        <div class="results-header">
+          <span id="image-count"></span>
+          <button id="download-all-btn" class="btn-secondary">
+            Download All
+          </button>
+        </div>
+        <div id="image-grid" class="image-grid"></div>
+      </div>
+    </div>
+
+    <!-- Lightbox overlay for full-size viewing -->
+    <div id="lightbox" class="lightbox hidden">
+      <button id="lightbox-close" class="lightbox-close">&times;</button>
+      <button id="lightbox-prev" class="lightbox-nav lightbox-prev-btn">
+        &#8249;
+      </button>
+      <button id="lightbox-next" class="lightbox-nav lightbox-next-btn">
+        &#8250;
+      </button>
+      <img id="lightbox-img" src="" alt="Full size" />
+      <div class="lightbox-footer">
+        <span id="lightbox-counter"></span>
+        <button id="lightbox-download" class="btn-secondary">Download</button>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
