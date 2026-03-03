@@ -13,54 +13,48 @@ app.use(express.static(path.join(__dirname, "public")));
 /**
  * Fetch a URL following redirects. Returns { status, headers, body }.
  */
-function fetchUrl(url, headers = {}, maxRedirects = 5) {
+function fetchUrl(url, extraHeaders = {}, maxRedirects = 5) {
   return new Promise((resolve, reject) => {
     if (maxRedirects <= 0) return reject(new Error("Too many redirects"));
 
     const parsedUrl = new URL(url);
     const transport = parsedUrl.protocol === "https:" ? https : http;
 
-    const req = transport.get(
-      url,
-      {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-          Accept:
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Accept-Encoding": "identity",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-User": "?1",
-          "Upgrade-Insecure-Requests": "1",
-          ...headers,
-        },
-      },
-      (res) => {
-        if (
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          const redirectUrl = res.headers.location.startsWith("http")
-            ? res.headers.location
-            : new URL(res.headers.location, url).href;
-          return resolve(fetchUrl(redirectUrl, headers, maxRedirects - 1));
-        }
+    const defaultHeaders = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      "Accept-Encoding": "identity",
+    };
 
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => {
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: Buffer.concat(chunks),
-          });
-        });
+    const headers = { ...defaultHeaders, ...extraHeaders };
+
+    const req = transport.get(url, { headers }, (res) => {
+      if (
+        res.statusCode >= 300 &&
+        res.statusCode < 400 &&
+        res.headers.location
+      ) {
+        const redirectUrl = res.headers.location.startsWith("http")
+          ? res.headers.location
+          : new URL(res.headers.location, url).href;
+        return resolve(
+          fetchUrl(redirectUrl, extraHeaders, maxRedirects - 1)
+        );
       }
-    );
+
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => {
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
     req.on("error", reject);
     req.setTimeout(15000, () => {
       req.destroy();
@@ -89,74 +83,113 @@ function decodeUnicodeEscapes(str) {
 }
 
 /**
+ * Clean up an extracted URL: decode escapes, fix HTML entities, validate.
+ */
+function sanitizeUrl(rawUrl) {
+  let url = rawUrl;
+  // Decode unicode escapes
+  url = decodeUnicodeEscapes(url);
+  // Decode HTML entities
+  url = url
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"');
+  // Remove backslash escapes (JSON-in-HTML)
+  url = url.replace(/\\\//g, "/");
+  // Validate it's a proper URL
+  try {
+    new URL(url);
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Strategy 1: Fetch the embed page (/embed/captioned/).
  * This endpoint is designed for third-party embedding and is less restricted.
  */
 async function fetchFromEmbed(shortcode) {
   const images = new Set();
+
+  function addImage(rawUrl) {
+    const url = sanitizeUrl(rawUrl);
+    if (
+      url &&
+      !url.includes("s150x150") &&
+      !url.includes("44x44") &&
+      !url.includes("profile_pic")
+    ) {
+      images.add(url);
+    }
+  }
+
   const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
 
   try {
     const response = await fetchUrl(embedUrl, {
-      Referer: "https://www.google.com/",
+      Referer: "https://www.instagram.com/",
     });
-    if (response.status !== 200) return [];
+    if (response.status !== 200) {
+      console.error(`Embed returned status ${response.status}`);
+      return [];
+    }
 
     const html = response.body.toString("utf-8");
 
-    // The embed page has images in <img> tags with Instagram CDN URLs
+    // 1. img tags with CDN URLs
     const imgRegex =
       /<img[^>]+src="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
     let match;
     while ((match = imgRegex.exec(html)) !== null) {
-      const src = decodeUnicodeEscapes(match[1]);
-      // Skip profile pictures and tiny thumbnails
-      if (
-        !src.includes("s150x150") &&
-        !src.includes("/s150x150/") &&
-        !src.includes("44x44") &&
-        !src.includes("profile_pic")
-      ) {
-        images.add(src);
-      }
+      addImage(match[1]);
     }
 
-    // Also check srcset for higher-res versions
+    // 2. srcset attributes
     const srcsetRegex =
-      /srcset="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
+      /srcset="([^"]+)"/gi;
     while ((match = srcsetRegex.exec(html)) !== null) {
-      const src = decodeUnicodeEscapes(match[1].split(" ")[0]);
-      if (!src.includes("s150x150") && !src.includes("profile_pic")) {
-        images.add(src);
+      // srcset can have multiple URLs separated by commas
+      const entries = match[1].split(",");
+      for (const entry of entries) {
+        const url = entry.trim().split(/\s+/)[0];
+        if (url && (url.includes("cdninstagram") || url.includes("fbcdn"))) {
+          addImage(url);
+        }
       }
     }
 
-    // Look for display_url / display_src in embedded JSON
+    // 3. display_url / display_src in embedded JSON/script
     const displayUrlRegex =
-      /"(?:display_url|display_src|thumbnail_src)"\s*:\s*"(https?:[^"]+)"/gi;
+      /"(?:display_url|display_src|thumbnail_src|src)"\s*:\s*"(https?:[^"]+(?:cdninstagram|fbcdn)[^"]+)"/gi;
     while ((match = displayUrlRegex.exec(html)) !== null) {
       try {
-        images.add(JSON.parse(`"${match[1]}"`));
+        addImage(JSON.parse(`"${match[1]}"`));
       } catch {
-        images.add(decodeUnicodeEscapes(match[1]));
+        addImage(match[1]);
       }
     }
 
-    // Look for image URLs in data attributes
+    // 4. data attributes
     const dataRegex =
       /data-(?:src|image|url)="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
     while ((match = dataRegex.exec(html)) !== null) {
-      const src = decodeUnicodeEscapes(match[1]);
-      if (!src.includes("s150x150") && !src.includes("profile_pic")) {
-        images.add(src);
-      }
+      addImage(match[1]);
     }
 
-    // Look in inline style background-image
+    // 5. background-image in inline styles
     const bgRegex =
       /background-image:\s*url\(['"]?(https:\/\/[^'")\s]+(?:cdninstagram|fbcdn)[^'")\s]+)['"]?\)/gi;
     while ((match = bgRegex.exec(html)) !== null) {
-      images.add(decodeUnicodeEscapes(match[1]));
+      addImage(match[1]);
+    }
+
+    // 6. Look for any CDN URL in the page (broad catch-all)
+    const cdnRegex =
+      /(https:\/\/(?:scontent[^"'\s\\]+?|[^"'\s\\]*?fbcdn\.net[^"'\s\\]+?)\.(?:jpg|jpeg|png|webp)(?:[^"'\s\\]*))/gi;
+    while ((match = cdnRegex.exec(html)) !== null) {
+      addImage(match[1]);
     }
   } catch (err) {
     console.error("Embed fetch error:", err.message);
@@ -177,6 +210,7 @@ async function fetchFromJsonEndpoint(shortcode) {
       "X-IG-App-ID": "936619743392459",
       "X-Requested-With": "XMLHttpRequest",
       Referer: `https://www.instagram.com/p/${shortcode}/`,
+      Accept: "application/json",
     });
     if (response.status !== 200) return [];
 
@@ -185,47 +219,52 @@ async function fetchFromJsonEndpoint(shortcode) {
     try {
       data = JSON.parse(text);
     } catch {
+      // Response might be HTML (login page), not JSON
       return [];
     }
 
-    // Navigate the response structure
-    const items = data?.items || data?.graphql?.shortcode_media
-      ? [data.graphql.shortcode_media]
-      : [];
-
+    // items[] format (newer API)
     if (data?.items) {
       for (const item of data.items) {
-        // Single image
         if (item.image_versions2?.candidates) {
-          // Get the highest resolution
           const best = item.image_versions2.candidates.reduce((a, b) =>
             (a.width || 0) > (b.width || 0) ? a : b
           );
-          if (best?.url) images.add(best.url);
+          if (best?.url) {
+            const clean = sanitizeUrl(best.url);
+            if (clean) images.add(clean);
+          }
         }
 
-        // Carousel
         if (item.carousel_media) {
           for (const cm of item.carousel_media) {
             if (cm.image_versions2?.candidates) {
               const best = cm.image_versions2.candidates.reduce((a, b) =>
                 (a.width || 0) > (b.width || 0) ? a : b
               );
-              if (best?.url) images.add(best.url);
+              if (best?.url) {
+                const clean = sanitizeUrl(best.url);
+                if (clean) images.add(clean);
+              }
             }
           }
         }
       }
     }
 
-    // GraphQL format
+    // graphql format (older API)
     const media = data?.graphql?.shortcode_media;
     if (media) {
-      if (media.display_url) images.add(media.display_url);
-
+      if (media.display_url) {
+        const clean = sanitizeUrl(media.display_url);
+        if (clean) images.add(clean);
+      }
       if (media.edge_sidecar_to_children?.edges) {
         for (const edge of media.edge_sidecar_to_children.edges) {
-          if (edge.node?.display_url) images.add(edge.node.display_url);
+          if (edge.node?.display_url) {
+            const clean = sanitizeUrl(edge.node.display_url);
+            if (clean) images.add(clean);
+          }
         }
       }
     }
@@ -243,8 +282,15 @@ async function fetchFromMainPage(shortcode) {
   const images = new Set();
   const pageUrl = `https://www.instagram.com/p/${shortcode}/`;
 
+  function addImage(rawUrl) {
+    const url = sanitizeUrl(rawUrl);
+    if (url) images.add(url);
+  }
+
   try {
-    const response = await fetchUrl(pageUrl);
+    const response = await fetchUrl(pageUrl, {
+      Referer: "https://www.instagram.com/",
+    });
     if (response.status !== 200) return [];
 
     const html = response.body.toString("utf-8");
@@ -254,12 +300,12 @@ async function fetchFromMainPage(shortcode) {
       /<meta\s+(?:property|name)="og:image"\s+content="([^"]+)"/gi;
     let match;
     while ((match = ogRegex.exec(html)) !== null) {
-      images.add(match[1]);
+      addImage(match[1]);
     }
     const ogRegex2 =
       /<meta\s+content="([^"]+)"\s+(?:property|name)="og:image"/gi;
     while ((match = ogRegex2.exec(html)) !== null) {
-      images.add(match[1]);
+      addImage(match[1]);
     }
 
     // display_url in script data
@@ -267,9 +313,9 @@ async function fetchFromMainPage(shortcode) {
       /"(?:display_url|display_src|thumbnail_src)"\s*:\s*"(https?:[^"]+)"/gi;
     while ((match = displayRegex.exec(html)) !== null) {
       try {
-        images.add(JSON.parse(`"${match[1]}"`));
+        addImage(JSON.parse(`"${match[1]}"`));
       } catch {
-        images.add(decodeUnicodeEscapes(match[1]));
+        addImage(match[1]);
       }
     }
 
@@ -281,10 +327,17 @@ async function fetchFromMainPage(shortcode) {
         const data = JSON.parse(match[1]);
         const imgs = Array.isArray(data.image) ? data.image : [data.image];
         for (const img of imgs) {
-          if (typeof img === "string") images.add(img);
-          else if (img?.url) images.add(img.url);
+          if (typeof img === "string") addImage(img);
+          else if (img?.url) addImage(img.url);
         }
       } catch {}
+    }
+
+    // Broad CDN catch-all
+    const cdnRegex =
+      /(https:\/\/(?:scontent[^"'\s\\]+?|[^"'\s\\]*?fbcdn\.net[^"'\s\\]+?)\.(?:jpg|jpeg|png|webp)(?:[^"'\s\\]*))/gi;
+    while ((match = cdnRegex.exec(html)) !== null) {
+      addImage(match[1]);
     }
   } catch (err) {
     console.error("Main page error:", err.message);
@@ -308,7 +361,10 @@ async function fetchFromOembed(shortcode) {
     if (response.status !== 200) return [];
 
     const data = JSON.parse(response.body.toString("utf-8"));
-    if (data.thumbnail_url) images.add(data.thumbnail_url);
+    if (data.thumbnail_url) {
+      const clean = sanitizeUrl(data.thumbnail_url);
+      if (clean) images.add(clean);
+    }
   } catch (err) {
     console.error("oEmbed error:", err.message);
   }
@@ -468,9 +524,26 @@ app.get("/api/proxy-image", async (req, res) => {
   }
 
   try {
-    const response = await fetchUrl(url);
+    const response = await fetchUrl(url, {
+      Referer: "https://www.instagram.com/",
+      Origin: "https://www.instagram.com",
+      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    });
+
+    // Log if we got an unexpected response
     const contentType = response.headers["content-type"] || "image/jpeg";
+    if (
+      response.status !== 200 ||
+      contentType.includes("text/html") ||
+      response.body.length < 1000
+    ) {
+      console.error(
+        `Proxy warning: status=${response.status}, type=${contentType}, size=${response.body.length}, url=${url.substring(0, 80)}...`
+      );
+    }
+
     res.set("Content-Type", contentType);
+    res.set("Content-Length", response.body.length);
     res.set("Cache-Control", "public, max-age=3600");
     res.set("Access-Control-Allow-Origin", "*");
     res.send(response.body);
