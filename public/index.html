@@ -39,6 +39,29 @@
         <p class="hint">Supports /p/, /reel/, and /tv/ links</p>
       </form>
 
+      <!-- Session setup for carousel support -->
+      <div id="session-panel" class="session-panel">
+        <button type="button" id="session-toggle" class="session-toggle">
+          <span id="session-indicator" class="indicator indicator-off"></span>
+          Session
+        </button>
+        <div id="session-form" class="session-form hidden">
+          <p class="session-info">
+            To get <strong>all images from carousel posts</strong>, paste your Instagram <code>sessionid</code> cookie:
+          </p>
+          <ol class="session-steps">
+            <li>Open <strong>instagram.com</strong> in your browser and log in</li>
+            <li>Press <strong>F12</strong> &rarr; Application &rarr; Cookies &rarr; instagram.com</li>
+            <li>Find <code>sessionid</code> and copy its <strong>Value</strong></li>
+          </ol>
+          <div class="session-input-group">
+            <input type="text" id="session-input" placeholder="Paste sessionid value here" autocomplete="off" />
+            <button type="button" id="session-save" class="btn-secondary">Save</button>
+            <button type="button" id="session-clear" class="btn-secondary">Clear</button>
+          </div>
+        </div>
+      </div>
+
       <div id="error-msg" class="error hidden"></div>
 
       <div id="results" class="results hidden">

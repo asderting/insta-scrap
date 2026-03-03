@@ -136,6 +136,15 @@ async function initCookies() {
 // Initialize cookies on startup
 initCookies();
 
+// Session ID management — needed for carousel posts (multi-image)
+let savedSessionId = null;
+
+function applySessionId() {
+  if (savedSessionId) {
+    cookieJar["sessionid"] = savedSessionId;
+  }
+}
+
 // --- Shortcode extraction ---
 
 function extractShortcode(url) {
@@ -437,6 +446,24 @@ async function fetchFromOembed(shortcode) {
 
 // --- API Routes ---
 
+// Save Instagram session ID
+app.post("/api/set-session", (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId || typeof sessionId !== "string" || sessionId.trim().length === 0) {
+    savedSessionId = null;
+    return res.json({ ok: true, hasSession: false });
+  }
+  savedSessionId = sessionId.trim();
+  applySessionId();
+  console.log("Session ID saved");
+  res.json({ ok: true, hasSession: true });
+});
+
+// Check if session is configured
+app.get("/api/session-status", (req, res) => {
+  res.json({ hasSession: !!savedSessionId });
+});
+
 app.post("/api/fetch-images", async (req, res) => {
   const { url } = req.body;
 
@@ -458,11 +485,12 @@ app.post("/api/fetch-images", async (req, res) => {
     return res.status(400).json({ error: "Could not extract post ID from URL." });
   }
 
-  // Ensure cookies are initialized
+  // Ensure cookies are initialized, then inject session ID
   await initCookies();
+  applySessionId();
 
   try {
-    console.log(`\nFetching images for: ${shortcode}`);
+    console.log(`\nFetching images for: ${shortcode} (session: ${savedSessionId ? "yes" : "no"})`);
 
     // Run all strategies in parallel
     const [mediaImages, embedImages, jsonImages, oembedImages] =

@@ -238,8 +238,62 @@ pasteBtn.addEventListener("click", async () => {
     urlInput.value = text;
     urlInput.focus();
   } catch {
-    // Fallback: focus the input so user can Ctrl+V manually
     urlInput.value = "";
     urlInput.focus();
   }
 });
+
+// --- Session panel ---
+const sessionToggle = document.getElementById("session-toggle");
+const sessionForm = document.getElementById("session-form");
+const sessionInput = document.getElementById("session-input");
+const sessionSave = document.getElementById("session-save");
+const sessionClear = document.getElementById("session-clear");
+const sessionIndicator = document.getElementById("session-indicator");
+
+sessionToggle.addEventListener("click", () => {
+  sessionForm.classList.toggle("hidden");
+});
+
+function setSessionIndicator(active) {
+  sessionIndicator.className = active ? "indicator indicator-on" : "indicator indicator-off";
+}
+
+sessionSave.addEventListener("click", async () => {
+  const sessionId = sessionInput.value.trim();
+  if (!sessionId) return;
+  try {
+    const res = await fetch("/api/set-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
+    const data = await res.json();
+    if (data.hasSession) {
+      setSessionIndicator(true);
+      sessionInput.value = "";
+      sessionForm.classList.add("hidden");
+    }
+  } catch {}
+});
+
+sessionClear.addEventListener("click", async () => {
+  try {
+    await fetch("/api/set-session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId: "" }),
+    });
+    setSessionIndicator(false);
+    sessionInput.value = "";
+  } catch {}
+});
+
+// Check session status on load
+(async () => {
+  try {
+    const res = await fetch("/api/session-status");
+    const data = await res.json();
+    setSessionIndicator(data.hasSession);
+  } catch {}
+})();
