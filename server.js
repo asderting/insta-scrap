@@ -337,10 +337,15 @@ async function fetchFromJsonEndpoint(shortcode) {
   const jsonUrl = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
 
   try {
+    // The CSRF token from cookies must be sent as a header too
+    const csrfToken = cookieJar["csrftoken"] || "";
+
     const response = await fetchWithCookies(jsonUrl, {
       extraHeaders: {
         "X-IG-App-ID": "936619743392459",
+        "X-CSRFToken": csrfToken,
         "X-Requested-With": "XMLHttpRequest",
+        "X-IG-WWW-Claim": "0",
         Referer: `https://www.instagram.com/p/${shortcode}/`,
         Accept: "*/*",
         "Sec-Fetch-Dest": "empty",
@@ -348,14 +353,26 @@ async function fetchFromJsonEndpoint(shortcode) {
         "Sec-Fetch-Site": "same-origin",
       },
     });
-    if (response.status !== 200) return [];
+
+    console.log(`  JSON endpoint: status=${response.status}, size=${response.body.length}`);
+
+    if (response.status !== 200) {
+      console.log(`  JSON endpoint returned ${response.status}`);
+      return [];
+    }
+
+    const text = response.body.toString("utf-8");
 
     let data;
     try {
-      data = JSON.parse(response.body.toString("utf-8"));
+      data = JSON.parse(text);
     } catch {
+      // Log first 200 chars to see what we got
+      console.log(`  JSON parse failed, response starts with: ${text.substring(0, 200)}`);
       return [];
     }
+
+    console.log(`  JSON data keys: ${Object.keys(data).join(", ")}`);
 
     // items[] format
     if (data?.items) {
@@ -444,6 +461,64 @@ async function fetchFromOembed(shortcode) {
   return images;
 }
 
+/**
+ * Strategy 5: Instagram GraphQL API — another way to get full post data.
+ */
+async function fetchFromGraphQL(shortcode) {
+  const images = [];
+  const csrfToken = cookieJar["csrftoken"] || "";
+
+  // query_hash for fetching post by shortcode
+  const queryHash = "b3055c01b4b222b8a47dc12b090e4e64";
+  const variables = JSON.stringify({ shortcode, child_comment_count: 0, fetch_comment_count: 0, parent_comment_count: 0, has_threaded_comments: false });
+  const graphqlUrl = `https://www.instagram.com/graphql/query/?query_hash=${queryHash}&variables=${encodeURIComponent(variables)}`;
+
+  try {
+    const response = await fetchWithCookies(graphqlUrl, {
+      extraHeaders: {
+        "X-IG-App-ID": "936619743392459",
+        "X-CSRFToken": csrfToken,
+        "X-Requested-With": "XMLHttpRequest",
+        Referer: `https://www.instagram.com/p/${shortcode}/`,
+        Accept: "*/*",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+      },
+    });
+
+    if (response.status !== 200) return [];
+
+    let data;
+    try {
+      data = JSON.parse(response.body.toString("utf-8"));
+    } catch {
+      return [];
+    }
+
+    const media = data?.data?.shortcode_media;
+    if (!media) return [];
+
+    console.log(`  GraphQL: found media type=${media.__typename || "unknown"}`);
+
+    if (media.edge_sidecar_to_children?.edges?.length > 0) {
+      for (const edge of media.edge_sidecar_to_children.edges) {
+        if (edge.node?.display_url) {
+          const url = sanitizeUrl(edge.node.display_url);
+          if (url) images.push(url);
+        }
+      }
+    } else if (media.display_url) {
+      const url = sanitizeUrl(media.display_url);
+      if (url) images.push(url);
+    }
+  } catch (err) {
+    console.error("GraphQL error:", err.message);
+  }
+
+  return images;
+}
+
 // --- API Routes ---
 
 // Save Instagram session ID
@@ -493,21 +568,23 @@ app.post("/api/fetch-images", async (req, res) => {
     console.log(`\nFetching images for: ${shortcode} (session: ${savedSessionId ? "yes" : "no"})`);
 
     // Run all strategies in parallel
-    const [mediaImages, embedImages, jsonImages, oembedImages] =
+    const [mediaImages, embedImages, jsonImages, oembedImages, graphqlImages] =
       await Promise.all([
         fetchFromMediaRedirect(shortcode),
         fetchFromEmbed(shortcode),
         fetchFromJsonEndpoint(shortcode),
         fetchFromOembed(shortcode),
+        fetchFromGraphQL(shortcode),
       ]);
 
     console.log(
-      `Results: media=${mediaImages.length}, embed=${embedImages.length}, json=${jsonImages.length}, oembed=${oembedImages.length}`
+      `Results: media=${mediaImages.length}, embed=${embedImages.length}, json=${jsonImages.length}, oembed=${oembedImages.length}, graphql=${graphqlImages.length}`
     );
 
     // Merge and deduplicate by CDN filename fingerprint
-    // Prioritize JSON (has all carousel images) > media > embed > oembed
+    // Prioritize sources that return carousel data: GraphQL > JSON > media > embed > oembed
     const allImages = [
+      ...graphqlImages,
       ...jsonImages,
       ...mediaImages,
       ...embedImages,
