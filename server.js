@@ -74,30 +74,18 @@ function extractShortcode(url) {
 }
 
 /**
- * Decode unicode escape sequences in strings (e.g. \u0026 -> &).
- */
-function decodeUnicodeEscapes(str) {
-  return str.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
-    String.fromCharCode(parseInt(hex, 16))
-  );
-}
-
-/**
  * Clean up an extracted URL: decode escapes, fix HTML entities, validate.
  */
 function sanitizeUrl(rawUrl) {
   let url = rawUrl;
   // Decode unicode escapes
-  url = decodeUnicodeEscapes(url);
+  url = url.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+    String.fromCharCode(parseInt(hex, 16))
+  );
   // Decode HTML entities
-  url = url
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"');
-  // Remove backslash escapes (JSON-in-HTML)
+  url = url.replace(/&amp;/g, "&").replace(/&quot;/g, '"');
+  // Remove backslash-escaped slashes (JSON-in-HTML)
   url = url.replace(/\\\//g, "/");
-  // Validate it's a proper URL
   try {
     new URL(url);
     return url;
@@ -107,102 +95,92 @@ function sanitizeUrl(rawUrl) {
 }
 
 /**
- * Strategy 1: Fetch the embed page (/embed/captioned/).
- * This endpoint is designed for third-party embedding and is less restricted.
+ * Check if a URL is likely a post image (not avatar, icon, etc).
+ */
+function isPostImage(url) {
+  if (!url) return false;
+  // Must be from Instagram/Facebook CDN
+  if (!url.includes("cdninstagram") && !url.includes("fbcdn")) return false;
+  // Skip profile pics and tiny thumbnails
+  if (url.includes("s150x150")) return false;
+  if (url.includes("s100x100")) return false;
+  if (url.includes("s50x50")) return false;
+  if (url.includes("44x44")) return false;
+  if (url.includes("profile_pic")) return false;
+  return true;
+}
+
+/**
+ * Fetch the embed page and extract images.
+ * The embed endpoint is designed for third-party embedding — less restricted.
  */
 async function fetchFromEmbed(shortcode) {
-  const images = new Set();
-
-  function addImage(rawUrl) {
-    const url = sanitizeUrl(rawUrl);
-    if (
-      url &&
-      !url.includes("s150x150") &&
-      !url.includes("44x44") &&
-      !url.includes("profile_pic")
-    ) {
-      images.add(url);
-    }
-  }
-
+  const images = [];
   const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
 
   try {
     const response = await fetchUrl(embedUrl, {
       Referer: "https://www.instagram.com/",
     });
-    if (response.status !== 200) {
-      console.error(`Embed returned status ${response.status}`);
-      return [];
-    }
+    if (response.status !== 200) return [];
 
     const html = response.body.toString("utf-8");
 
-    // 1. img tags with CDN URLs
-    const imgRegex =
-      /<img[^>]+src="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
+    // The embed page has a main post image — look for the EmbeddedMediaImage class
+    // or the main <img> in the media container
     let match;
-    while ((match = imgRegex.exec(html)) !== null) {
-      addImage(match[1]);
+
+    // Look for class="EmbeddedMediaImage" which is the main post image
+    const embeddedImgRegex =
+      /class="EmbeddedMediaImage"[^>]*src="([^"]+)"/gi;
+    while ((match = embeddedImgRegex.exec(html)) !== null) {
+      const url = sanitizeUrl(match[1]);
+      if (url && isPostImage(url)) images.push(url);
     }
 
-    // 2. srcset attributes
-    const srcsetRegex =
-      /srcset="([^"]+)"/gi;
-    while ((match = srcsetRegex.exec(html)) !== null) {
-      // srcset can have multiple URLs separated by commas
-      const entries = match[1].split(",");
-      for (const entry of entries) {
-        const url = entry.trim().split(/\s+/)[0];
-        if (url && (url.includes("cdninstagram") || url.includes("fbcdn"))) {
-          addImage(url);
-        }
-      }
+    // Also reversed attribute order
+    const embeddedImgRegex2 =
+      /src="([^"]+)"[^>]*class="EmbeddedMediaImage"/gi;
+    while ((match = embeddedImgRegex2.exec(html)) !== null) {
+      const url = sanitizeUrl(match[1]);
+      if (url && isPostImage(url)) images.push(url);
     }
 
-    // 3. display_url / display_src in embedded JSON/script
+    // Look for display_url in embedded script data (most reliable for the actual image)
     const displayUrlRegex =
-      /"(?:display_url|display_src|thumbnail_src|src)"\s*:\s*"(https?:[^"]+(?:cdninstagram|fbcdn)[^"]+)"/gi;
+      /"display_url"\s*:\s*"(https?:[^"]+)"/gi;
     while ((match = displayUrlRegex.exec(html)) !== null) {
       try {
-        addImage(JSON.parse(`"${match[1]}"`));
+        const url = sanitizeUrl(JSON.parse(`"${match[1]}"`));
+        if (url && isPostImage(url)) images.push(url);
       } catch {
-        addImage(match[1]);
+        const url = sanitizeUrl(match[1]);
+        if (url && isPostImage(url)) images.push(url);
       }
     }
 
-    // 4. data attributes
-    const dataRegex =
-      /data-(?:src|image|url)="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
-    while ((match = dataRegex.exec(html)) !== null) {
-      addImage(match[1]);
-    }
-
-    // 5. background-image in inline styles
-    const bgRegex =
-      /background-image:\s*url\(['"]?(https:\/\/[^'")\s]+(?:cdninstagram|fbcdn)[^'")\s]+)['"]?\)/gi;
-    while ((match = bgRegex.exec(html)) !== null) {
-      addImage(match[1]);
-    }
-
-    // 6. Look for any CDN URL in the page (broad catch-all)
-    const cdnRegex =
-      /(https:\/\/(?:scontent[^"'\s\\]+?|[^"'\s\\]*?fbcdn\.net[^"'\s\\]+?)\.(?:jpg|jpeg|png|webp)(?:[^"'\s\\]*))/gi;
-    while ((match = cdnRegex.exec(html)) !== null) {
-      addImage(match[1]);
+    // If we found nothing yet, look for the main img tag in the embed
+    // (the embed usually has just one or a few <img> tags for the post)
+    if (images.length === 0) {
+      const imgRegex =
+        /<img[^>]+src="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
+      while ((match = imgRegex.exec(html)) !== null) {
+        const url = sanitizeUrl(match[1]);
+        if (url && isPostImage(url)) images.push(url);
+      }
     }
   } catch (err) {
     console.error("Embed fetch error:", err.message);
   }
 
-  return [...images];
+  return images;
 }
 
 /**
- * Strategy 2: Use the ?__a=1&__d=dis JSON endpoint.
+ * Use the ?__a=1&__d=dis JSON endpoint (returns structured data when not blocked).
  */
 async function fetchFromJsonEndpoint(shortcode) {
-  const images = new Set();
+  const images = [];
   const jsonUrl = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
 
   try {
@@ -214,12 +192,10 @@ async function fetchFromJsonEndpoint(shortcode) {
     });
     if (response.status !== 200) return [];
 
-    const text = response.body.toString("utf-8");
     let data;
     try {
-      data = JSON.parse(text);
+      data = JSON.parse(response.body.toString("utf-8"));
     } catch {
-      // Response might be HTML (login page), not JSON
       return [];
     }
 
@@ -231,11 +207,10 @@ async function fetchFromJsonEndpoint(shortcode) {
             (a.width || 0) > (b.width || 0) ? a : b
           );
           if (best?.url) {
-            const clean = sanitizeUrl(best.url);
-            if (clean) images.add(clean);
+            const url = sanitizeUrl(best.url);
+            if (url) images.push(url);
           }
         }
-
         if (item.carousel_media) {
           for (const cm of item.carousel_media) {
             if (cm.image_versions2?.candidates) {
@@ -243,8 +218,8 @@ async function fetchFromJsonEndpoint(shortcode) {
                 (a.width || 0) > (b.width || 0) ? a : b
               );
               if (best?.url) {
-                const clean = sanitizeUrl(best.url);
-                if (clean) images.add(clean);
+                const url = sanitizeUrl(best.url);
+                if (url) images.push(url);
               }
             }
           }
@@ -252,18 +227,18 @@ async function fetchFromJsonEndpoint(shortcode) {
       }
     }
 
-    // graphql format (older API)
+    // graphql format
     const media = data?.graphql?.shortcode_media;
     if (media) {
       if (media.display_url) {
-        const clean = sanitizeUrl(media.display_url);
-        if (clean) images.add(clean);
+        const url = sanitizeUrl(media.display_url);
+        if (url) images.push(url);
       }
       if (media.edge_sidecar_to_children?.edges) {
         for (const edge of media.edge_sidecar_to_children.edges) {
           if (edge.node?.display_url) {
-            const clean = sanitizeUrl(edge.node.display_url);
-            if (clean) images.add(clean);
+            const url = sanitizeUrl(edge.node.display_url);
+            if (url) images.push(url);
           }
         }
       }
@@ -272,87 +247,16 @@ async function fetchFromJsonEndpoint(shortcode) {
     console.error("JSON endpoint error:", err.message);
   }
 
-  return [...images];
+  return images;
 }
 
 /**
- * Strategy 3: Fetch the main page and parse og:image / embedded data.
- */
-async function fetchFromMainPage(shortcode) {
-  const images = new Set();
-  const pageUrl = `https://www.instagram.com/p/${shortcode}/`;
-
-  function addImage(rawUrl) {
-    const url = sanitizeUrl(rawUrl);
-    if (url) images.add(url);
-  }
-
-  try {
-    const response = await fetchUrl(pageUrl, {
-      Referer: "https://www.instagram.com/",
-    });
-    if (response.status !== 200) return [];
-
-    const html = response.body.toString("utf-8");
-
-    // og:image meta tags
-    const ogRegex =
-      /<meta\s+(?:property|name)="og:image"\s+content="([^"]+)"/gi;
-    let match;
-    while ((match = ogRegex.exec(html)) !== null) {
-      addImage(match[1]);
-    }
-    const ogRegex2 =
-      /<meta\s+content="([^"]+)"\s+(?:property|name)="og:image"/gi;
-    while ((match = ogRegex2.exec(html)) !== null) {
-      addImage(match[1]);
-    }
-
-    // display_url in script data
-    const displayRegex =
-      /"(?:display_url|display_src|thumbnail_src)"\s*:\s*"(https?:[^"]+)"/gi;
-    while ((match = displayRegex.exec(html)) !== null) {
-      try {
-        addImage(JSON.parse(`"${match[1]}"`));
-      } catch {
-        addImage(match[1]);
-      }
-    }
-
-    // JSON-LD
-    const jsonLdRegex =
-      /<script\s+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
-    while ((match = jsonLdRegex.exec(html)) !== null) {
-      try {
-        const data = JSON.parse(match[1]);
-        const imgs = Array.isArray(data.image) ? data.image : [data.image];
-        for (const img of imgs) {
-          if (typeof img === "string") addImage(img);
-          else if (img?.url) addImage(img.url);
-        }
-      } catch {}
-    }
-
-    // Broad CDN catch-all
-    const cdnRegex =
-      /(https:\/\/(?:scontent[^"'\s\\]+?|[^"'\s\\]*?fbcdn\.net[^"'\s\\]+?)\.(?:jpg|jpeg|png|webp)(?:[^"'\s\\]*))/gi;
-    while ((match = cdnRegex.exec(html)) !== null) {
-      addImage(match[1]);
-    }
-  } catch (err) {
-    console.error("Main page error:", err.message);
-  }
-
-  return [...images];
-}
-
-/**
- * Strategy 4: Use Instagram's oEmbed API (no auth required, returns thumbnail).
+ * Use Instagram's oEmbed API (always works for public posts, returns 1 thumbnail).
  */
 async function fetchFromOembed(shortcode) {
-  const images = new Set();
-  const url = `https://www.instagram.com/p/${shortcode}/`;
-  const oembedUrl = `https://api.instagram.com/oembed/?url=${encodeURIComponent(url)}&maxwidth=1080`;
+  const images = [];
+  const postUrl = `https://www.instagram.com/p/${shortcode}/`;
+  const oembedUrl = `https://api.instagram.com/oembed/?url=${encodeURIComponent(postUrl)}&maxwidth=1080`;
 
   try {
     const response = await fetchUrl(oembedUrl, {
@@ -362,70 +266,58 @@ async function fetchFromOembed(shortcode) {
 
     const data = JSON.parse(response.body.toString("utf-8"));
     if (data.thumbnail_url) {
-      const clean = sanitizeUrl(data.thumbnail_url);
-      if (clean) images.add(clean);
+      const url = sanitizeUrl(data.thumbnail_url);
+      if (url) images.push(url);
     }
   } catch (err) {
     console.error("oEmbed error:", err.message);
   }
 
-  return [...images];
+  return images;
 }
 
 /**
- * Deduplicate images — keep only the highest resolution variant per base image.
- * Instagram CDN URLs share a path pattern but differ in resolution params.
+ * Verify a URL actually returns image data (not HTML or empty).
  */
-function deduplicateImages(urls) {
-  // Group by the image path identifier (the part that stays the same across resolutions)
-  const groups = new Map();
+async function verifyImage(url) {
+  try {
+    const parsed = new URL(url);
+    const transport = parsed.protocol === "https:" ? https : http;
 
-  for (const url of urls) {
-    try {
-      const parsed = new URL(url);
-      // Extract the image filename/path as a key
-      const pathParts = parsed.pathname.split("/");
-      const filename = pathParts[pathParts.length - 1];
-      // Also use a coarser key: strip resolution suffixes
-      const baseKey = filename.replace(
-        /(_[ns]\d+x\d+|_\d+x\d+)/g,
-        ""
+    return new Promise((resolve) => {
+      const req = transport.request(
+        url,
+        {
+          method: "HEAD",
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            Referer: "https://www.instagram.com/",
+            Accept: "image/*,*/*;q=0.8",
+          },
+        },
+        (res) => {
+          const ct = res.headers["content-type"] || "";
+          const cl = parseInt(res.headers["content-length"] || "0", 10);
+          res.resume(); // drain the response
+          // Valid if: 200 OK, content-type is image, and size > 5KB (not a placeholder)
+          resolve(
+            res.statusCode === 200 &&
+            ct.startsWith("image/") &&
+            (cl === 0 || cl > 5000) // content-length 0 means unknown, that's OK
+          );
+        }
       );
-
-      if (!groups.has(baseKey)) {
-        groups.set(baseKey, []);
-      }
-      groups.get(baseKey).push(url);
-    } catch {
-      // If URL parsing fails, keep it as-is
-      if (!groups.has(url)) {
-        groups.set(url, [url]);
-      }
-    }
-  }
-
-  // For each group, prefer URLs with larger resolution indicators or longer URLs
-  const result = [];
-  for (const [, group] of groups) {
-    // Sort by URL length descending (longer URLs tend to have more params = higher res)
-    // and by presence of resolution indicators
-    group.sort((a, b) => {
-      const resA = extractResolution(a);
-      const resB = extractResolution(b);
-      if (resA !== resB) return resB - resA;
-      return b.length - a.length;
+      req.on("error", () => resolve(false));
+      req.setTimeout(8000, () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
     });
-    result.push(group[0]);
+  } catch {
+    return false;
   }
-
-  return result;
-}
-
-function extractResolution(url) {
-  // Try to extract resolution from URL patterns like 1080x1080 or e35/...
-  const match = url.match(/(\d{3,4})x(\d{3,4})/);
-  if (match) return parseInt(match[1]) * parseInt(match[2]);
-  return 0;
 }
 
 // --- API Routes ---
@@ -452,40 +344,60 @@ app.post("/api/fetch-images", async (req, res) => {
   }
 
   try {
-    // Run all strategies in parallel for speed
-    const [embedImages, jsonImages, mainImages, oembedImages] =
-      await Promise.all([
-        fetchFromEmbed(shortcode),
-        fetchFromJsonEndpoint(shortcode),
-        fetchFromMainPage(shortcode),
-        fetchFromOembed(shortcode),
-      ]);
+    // Run all strategies in parallel
+    const [embedImages, jsonImages, oembedImages] = await Promise.all([
+      fetchFromEmbed(shortcode),
+      fetchFromJsonEndpoint(shortcode),
+      fetchFromOembed(shortcode),
+    ]);
 
-    // Merge all results
-    const allImages = [
-      ...new Set([
-        ...jsonImages,
-        ...embedImages,
-        ...mainImages,
-        ...oembedImages,
-      ]),
-    ];
+    console.log(
+      `Raw results for ${shortcode}: embed=${embedImages.length}, json=${jsonImages.length}, oembed=${oembedImages.length}`
+    );
 
-    if (allImages.length === 0) {
+    // Merge and deduplicate
+    const seen = new Set();
+    const uniqueImages = [];
+    // Prioritize JSON (highest quality) > embed > oembed
+    for (const img of [...jsonImages, ...embedImages, ...oembedImages]) {
+      if (!seen.has(img)) {
+        seen.add(img);
+        uniqueImages.push(img);
+      }
+    }
+
+    if (uniqueImages.length === 0) {
       return res.status(404).json({
         error:
           "No images found. The post may be private, a video-only post, or Instagram may be blocking the request.",
       });
     }
 
-    // Deduplicate similar URLs (different resolutions of same image)
-    const images = deduplicateImages(allImages);
-
-    console.log(
-      `Found ${images.length} unique images for ${shortcode} (embed: ${embedImages.length}, json: ${jsonImages.length}, main: ${mainImages.length}, oembed: ${oembedImages.length})`
+    // Verify images actually load (HEAD request) — filter out broken ones
+    const verifyResults = await Promise.all(
+      uniqueImages.map(async (imgUrl) => {
+        const valid = await verifyImage(imgUrl);
+        if (!valid) console.log(`  Filtered out (invalid): ${imgUrl.substring(0, 80)}...`);
+        return { url: imgUrl, valid };
+      })
     );
 
-    res.json({ images });
+    const validImages = verifyResults
+      .filter((r) => r.valid)
+      .map((r) => r.url);
+
+    console.log(
+      `Verified: ${validImages.length}/${uniqueImages.length} images valid for ${shortcode}`
+    );
+
+    if (validImages.length === 0) {
+      // If verification filtered everything, return unverified as fallback
+      // (HEAD might be blocked while GET works)
+      console.log("All images failed HEAD check, returning unverified as fallback");
+      return res.json({ images: uniqueImages.slice(0, 10) });
+    }
+
+    res.json({ images: validImages });
   } catch (err) {
     console.error("Fetch error:", err.message);
     res.status(500).json({ error: `Failed to fetch post: ${err.message}` });
@@ -527,19 +439,18 @@ app.get("/api/proxy-image", async (req, res) => {
     const response = await fetchUrl(url, {
       Referer: "https://www.instagram.com/",
       Origin: "https://www.instagram.com",
-      Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      Accept:
+        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     });
 
-    // Log if we got an unexpected response
     const contentType = response.headers["content-type"] || "image/jpeg";
-    if (
-      response.status !== 200 ||
-      contentType.includes("text/html") ||
-      response.body.length < 1000
-    ) {
+
+    // If the CDN returned HTML or a tiny response, it's not an image
+    if (contentType.includes("text/html") || response.body.length < 1000) {
       console.error(
-        `Proxy warning: status=${response.status}, type=${contentType}, size=${response.body.length}, url=${url.substring(0, 80)}...`
+        `Proxy: not an image — status=${response.status}, type=${contentType}, size=${response.body.length}`
       );
+      return res.status(502).json({ error: "Image not available" });
     }
 
     res.set("Content-Type", contentType);

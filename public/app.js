@@ -69,6 +69,14 @@ function renderImages(images) {
     img.loading = "lazy";
     img.draggable = true;
 
+    // Hide card if the image fails to load (broken/blank)
+    img.addEventListener("error", () => {
+      card.remove();
+      // Remove from currentImages so lightbox/download skip it
+      currentImages = currentImages.filter((_, i) => i !== index);
+      updateImageCount();
+    });
+
     // Enable drag-and-drop as a file
     img.addEventListener("dragstart", (e) => {
       e.dataTransfer.setData("text/uri-list", proxyUrl);
@@ -201,6 +209,16 @@ function setLoading(loading) {
   fetchBtn.disabled = loading;
   btnText.textContent = loading ? "Fetching..." : "Fetch Images";
   btnSpinner.classList.toggle("hidden", !loading);
+}
+
+function updateImageCount() {
+  const cards = imageGrid.querySelectorAll(".image-card");
+  if (cards.length === 0) {
+    results.classList.add("hidden");
+    showError("All images failed to load. Instagram may be blocking requests.");
+  } else {
+    imageCount.textContent = `${cards.length} image${cards.length !== 1 ? "s" : ""} loaded`;
+  }
 }
 
 function showError(msg) {
