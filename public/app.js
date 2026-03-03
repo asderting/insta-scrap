@@ -212,15 +212,16 @@ function hideError() {
   errorMsg.classList.add("hidden");
 }
 
-// Paste URL on focus
-urlInput.addEventListener("focus", async () => {
-  if (urlInput.value) return;
+// Paste button
+const pasteBtn = document.getElementById("paste-btn");
+pasteBtn.addEventListener("click", async () => {
   try {
     const text = await navigator.clipboard.readText();
-    if (/instagram\.com\/(p|reel|tv)\//.test(text)) {
-      urlInput.value = text;
-    }
+    urlInput.value = text;
+    urlInput.focus();
   } catch {
-    // Clipboard access denied — that's fine
+    // Fallback: focus the input so user can Ctrl+V manually
+    urlInput.value = "";
+    urlInput.focus();
   }
 });
