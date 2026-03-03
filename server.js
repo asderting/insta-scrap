@@ -10,29 +10,71 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
+// --- Cookie-aware HTTP client ---
+
+// Global cookie jar for instagram.com
+let cookieJar = {};
+let cookiesInitialized = false;
+
+function parseCookies(setCookieHeaders) {
+  if (!setCookieHeaders) return;
+  const headers = Array.isArray(setCookieHeaders)
+    ? setCookieHeaders
+    : [setCookieHeaders];
+  for (const header of headers) {
+    const parts = header.split(";")[0].split("=");
+    const name = parts[0].trim();
+    const value = parts.slice(1).join("=").trim();
+    if (name && value) cookieJar[name] = value;
+  }
+}
+
+function getCookieString() {
+  return Object.entries(cookieJar)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
 /**
- * Fetch a URL following redirects. Returns { status, headers, body }.
+ * Make an HTTP(S) request with cookie support.
+ * followRedirects: true = follow redirects (default), false = return redirect info
  */
-function fetchUrl(url, extraHeaders = {}, maxRedirects = 5) {
+function fetchWithCookies(url, options = {}) {
+  const {
+    extraHeaders = {},
+    followRedirects = true,
+    maxRedirects = 5,
+    method = "GET",
+  } = options;
+
   return new Promise((resolve, reject) => {
     if (maxRedirects <= 0) return reject(new Error("Too many redirects"));
 
     const parsedUrl = new URL(url);
     const transport = parsedUrl.protocol === "https:" ? https : http;
 
-    const defaultHeaders = {
+    const headers = {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
       "Accept-Encoding": "identity",
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "none",
+      "Sec-Fetch-User": "?1",
+      "Upgrade-Insecure-Requests": "1",
+      Cookie: getCookieString(),
+      ...extraHeaders,
     };
 
-    const headers = { ...defaultHeaders, ...extraHeaders };
+    const req = transport.request(url, { method, headers }, (res) => {
+      // Always capture cookies from response
+      parseCookies(res.headers["set-cookie"]);
 
-    const req = transport.get(url, { headers }, (res) => {
       if (
+        followRedirects &&
         res.statusCode >= 300 &&
         res.statusCode < 400 &&
         res.headers.location
@@ -40,8 +82,12 @@ function fetchUrl(url, extraHeaders = {}, maxRedirects = 5) {
         const redirectUrl = res.headers.location.startsWith("http")
           ? res.headers.location
           : new URL(res.headers.location, url).href;
+        res.resume();
         return resolve(
-          fetchUrl(redirectUrl, extraHeaders, maxRedirects - 1)
+          fetchWithCookies(redirectUrl, {
+            ...options,
+            maxRedirects: maxRedirects - 1,
+          })
         );
       }
 
@@ -52,6 +98,7 @@ function fetchUrl(url, extraHeaders = {}, maxRedirects = 5) {
           status: res.statusCode,
           headers: res.headers,
           body: Buffer.concat(chunks),
+          redirectUrl: res.headers.location || null,
         });
       });
     });
@@ -60,12 +107,37 @@ function fetchUrl(url, extraHeaders = {}, maxRedirects = 5) {
       req.destroy();
       reject(new Error("Request timed out"));
     });
+    req.end();
   });
 }
 
 /**
- * Extract the shortcode from an Instagram URL.
+ * Visit instagram.com to initialize cookies (csrftoken, mid, ig_did, etc).
+ * Must be called before any other Instagram requests.
  */
+async function initCookies() {
+  if (cookiesInitialized) return;
+
+  try {
+    console.log("Initializing Instagram cookies...");
+    await fetchWithCookies("https://www.instagram.com/", {
+      extraHeaders: {
+        Referer: "https://www.google.com/",
+      },
+    });
+    cookiesInitialized = true;
+    const cookieNames = Object.keys(cookieJar);
+    console.log(`Got ${cookieNames.length} cookies: ${cookieNames.join(", ")}`);
+  } catch (err) {
+    console.error("Cookie init error:", err.message);
+  }
+}
+
+// Initialize cookies on startup
+initCookies();
+
+// --- Shortcode extraction ---
+
 function extractShortcode(url) {
   const match = url.match(
     /instagram\.com\/(?:p|reel|tv)\/([A-Za-z0-9_-]+)/i
@@ -73,18 +145,12 @@ function extractShortcode(url) {
   return match ? match[1] : null;
 }
 
-/**
- * Clean up an extracted URL: decode escapes, fix HTML entities, validate.
- */
 function sanitizeUrl(rawUrl) {
   let url = rawUrl;
-  // Decode unicode escapes
   url = url.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
     String.fromCharCode(parseInt(hex, 16))
   );
-  // Decode HTML entities
   url = url.replace(/&amp;/g, "&").replace(/&quot;/g, '"');
-  // Remove backslash-escaped slashes (JSON-in-HTML)
   url = url.replace(/\\\//g, "/");
   try {
     new URL(url);
@@ -94,14 +160,9 @@ function sanitizeUrl(rawUrl) {
   }
 }
 
-/**
- * Check if a URL is likely a post image (not avatar, icon, etc).
- */
 function isPostImage(url) {
   if (!url) return false;
-  // Must be from Instagram/Facebook CDN
   if (!url.includes("cdninstagram") && !url.includes("fbcdn")) return false;
-  // Skip profile pics and tiny thumbnails
   if (url.includes("s150x150")) return false;
   if (url.includes("s100x100")) return false;
   if (url.includes("s50x50")) return false;
@@ -110,35 +171,76 @@ function isPostImage(url) {
   return true;
 }
 
+// --- Extraction strategies ---
+
 /**
- * Fetch the embed page and extract images.
- * The embed endpoint is designed for third-party embedding — less restricted.
+ * Strategy 1: /media/?size=l — Instagram redirects to the CDN image URL.
+ * Most reliable, works without JS, but only returns the first image (not carousel).
+ */
+async function fetchFromMediaRedirect(shortcode) {
+  const images = [];
+  const mediaUrl = `https://www.instagram.com/p/${shortcode}/media/?size=l`;
+
+  try {
+    // Don't follow redirects — we want the Location header
+    const response = await fetchWithCookies(mediaUrl, {
+      followRedirects: false,
+    });
+
+    if (response.status >= 300 && response.status < 400 && response.redirectUrl) {
+      const url = sanitizeUrl(response.redirectUrl);
+      if (url) {
+        console.log(`  media redirect → ${url.substring(0, 80)}...`);
+        images.push(url);
+      }
+    } else if (response.status === 200) {
+      // Sometimes it returns the image directly instead of redirecting
+      const ct = response.headers["content-type"] || "";
+      if (ct.startsWith("image/") && response.body.length > 5000) {
+        // We got the actual image — we can't use a URL for this,
+        // but let's try to get the URL from the response
+        console.log("  media returned image directly (no redirect URL)");
+      }
+    }
+  } catch (err) {
+    console.error("Media redirect error:", err.message);
+  }
+
+  return images;
+}
+
+/**
+ * Strategy 2: Embed page with cookies.
  */
 async function fetchFromEmbed(shortcode) {
   const images = [];
   const embedUrl = `https://www.instagram.com/p/${shortcode}/embed/captioned/`;
 
   try {
-    const response = await fetchUrl(embedUrl, {
-      Referer: "https://www.instagram.com/",
+    const response = await fetchWithCookies(embedUrl, {
+      extraHeaders: {
+        Referer: "https://www.instagram.com/",
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+      },
     });
-    if (response.status !== 200) return [];
+
+    if (response.status !== 200) {
+      console.log(`  embed returned status ${response.status}`);
+      return [];
+    }
 
     const html = response.body.toString("utf-8");
-
-    // The embed page has a main post image — look for the EmbeddedMediaImage class
-    // or the main <img> in the media container
     let match;
 
-    // Look for class="EmbeddedMediaImage" which is the main post image
+    // 1. EmbeddedMediaImage class
     const embeddedImgRegex =
       /class="EmbeddedMediaImage"[^>]*src="([^"]+)"/gi;
     while ((match = embeddedImgRegex.exec(html)) !== null) {
       const url = sanitizeUrl(match[1]);
       if (url && isPostImage(url)) images.push(url);
     }
-
-    // Also reversed attribute order
     const embeddedImgRegex2 =
       /src="([^"]+)"[^>]*class="EmbeddedMediaImage"/gi;
     while ((match = embeddedImgRegex2.exec(html)) !== null) {
@@ -146,9 +248,8 @@ async function fetchFromEmbed(shortcode) {
       if (url && isPostImage(url)) images.push(url);
     }
 
-    // Look for display_url in embedded script data (most reliable for the actual image)
-    const displayUrlRegex =
-      /"display_url"\s*:\s*"(https?:[^"]+)"/gi;
+    // 2. display_url in script data
+    const displayUrlRegex = /"display_url"\s*:\s*"(https?:[^"]+)"/gi;
     while ((match = displayUrlRegex.exec(html)) !== null) {
       try {
         const url = sanitizeUrl(JSON.parse(`"${match[1]}"`));
@@ -159,8 +260,7 @@ async function fetchFromEmbed(shortcode) {
       }
     }
 
-    // If we found nothing yet, look for the main img tag in the embed
-    // (the embed usually has just one or a few <img> tags for the post)
+    // 3. img tags with CDN src (fallback)
     if (images.length === 0) {
       const imgRegex =
         /<img[^>]+src="(https:\/\/[^"]*(?:cdninstagram|fbcdn)[^"]+)"/gi;
@@ -169,26 +269,38 @@ async function fetchFromEmbed(shortcode) {
         if (url && isPostImage(url)) images.push(url);
       }
     }
+
+    // Log a snippet of the HTML if we got nothing (for debugging)
+    if (images.length === 0) {
+      const title = html.match(/<title>([^<]*)<\/title>/i);
+      console.log(`  embed page title: "${title ? title[1] : "none"}"`);
+      console.log(`  embed HTML length: ${html.length}`);
+    }
   } catch (err) {
-    console.error("Embed fetch error:", err.message);
+    console.error("Embed error:", err.message);
   }
 
   return images;
 }
 
 /**
- * Use the ?__a=1&__d=dis JSON endpoint (returns structured data when not blocked).
+ * Strategy 3: JSON endpoint with cookies.
  */
 async function fetchFromJsonEndpoint(shortcode) {
   const images = [];
   const jsonUrl = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
 
   try {
-    const response = await fetchUrl(jsonUrl, {
-      "X-IG-App-ID": "936619743392459",
-      "X-Requested-With": "XMLHttpRequest",
-      Referer: `https://www.instagram.com/p/${shortcode}/`,
-      Accept: "application/json",
+    const response = await fetchWithCookies(jsonUrl, {
+      extraHeaders: {
+        "X-IG-App-ID": "936619743392459",
+        "X-Requested-With": "XMLHttpRequest",
+        Referer: `https://www.instagram.com/p/${shortcode}/`,
+        Accept: "*/*",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+      },
     });
     if (response.status !== 200) return [];
 
@@ -199,7 +311,7 @@ async function fetchFromJsonEndpoint(shortcode) {
       return [];
     }
 
-    // items[] format (newer API)
+    // items[] format
     if (data?.items) {
       for (const item of data.items) {
         if (item.image_versions2?.candidates) {
@@ -251,7 +363,7 @@ async function fetchFromJsonEndpoint(shortcode) {
 }
 
 /**
- * Use Instagram's oEmbed API (always works for public posts, returns 1 thumbnail).
+ * Strategy 4: oEmbed with cookies.
  */
 async function fetchFromOembed(shortcode) {
   const images = [];
@@ -259,65 +371,28 @@ async function fetchFromOembed(shortcode) {
   const oembedUrl = `https://api.instagram.com/oembed/?url=${encodeURIComponent(postUrl)}&maxwidth=1080`;
 
   try {
-    const response = await fetchUrl(oembedUrl, {
-      Accept: "application/json",
+    const response = await fetchWithCookies(oembedUrl, {
+      extraHeaders: {
+        Accept: "application/json",
+        Referer: "https://www.instagram.com/",
+      },
     });
     if (response.status !== 200) return [];
 
-    const data = JSON.parse(response.body.toString("utf-8"));
-    if (data.thumbnail_url) {
-      const url = sanitizeUrl(data.thumbnail_url);
-      if (url) images.push(url);
+    const text = response.body.toString("utf-8");
+    // Check it's actually JSON before parsing
+    if (text.startsWith("{") || text.startsWith("[")) {
+      const data = JSON.parse(text);
+      if (data.thumbnail_url) {
+        const url = sanitizeUrl(data.thumbnail_url);
+        if (url) images.push(url);
+      }
     }
   } catch (err) {
     console.error("oEmbed error:", err.message);
   }
 
   return images;
-}
-
-/**
- * Verify a URL actually returns image data (not HTML or empty).
- */
-async function verifyImage(url) {
-  try {
-    const parsed = new URL(url);
-    const transport = parsed.protocol === "https:" ? https : http;
-
-    return new Promise((resolve) => {
-      const req = transport.request(
-        url,
-        {
-          method: "HEAD",
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            Referer: "https://www.instagram.com/",
-            Accept: "image/*,*/*;q=0.8",
-          },
-        },
-        (res) => {
-          const ct = res.headers["content-type"] || "";
-          const cl = parseInt(res.headers["content-length"] || "0", 10);
-          res.resume(); // drain the response
-          // Valid if: 200 OK, content-type is image, and size > 5KB (not a placeholder)
-          resolve(
-            res.statusCode === 200 &&
-            ct.startsWith("image/") &&
-            (cl === 0 || cl > 5000) // content-length 0 means unknown, that's OK
-          );
-        }
-      );
-      req.on("error", () => resolve(false));
-      req.setTimeout(8000, () => {
-        req.destroy();
-        resolve(false);
-      });
-      req.end();
-    });
-  } catch {
-    return false;
-  }
 }
 
 // --- API Routes ---
@@ -343,23 +418,34 @@ app.post("/api/fetch-images", async (req, res) => {
     return res.status(400).json({ error: "Could not extract post ID from URL." });
   }
 
+  // Ensure cookies are initialized
+  await initCookies();
+
   try {
+    console.log(`\nFetching images for: ${shortcode}`);
+
     // Run all strategies in parallel
-    const [embedImages, jsonImages, oembedImages] = await Promise.all([
-      fetchFromEmbed(shortcode),
-      fetchFromJsonEndpoint(shortcode),
-      fetchFromOembed(shortcode),
-    ]);
+    const [mediaImages, embedImages, jsonImages, oembedImages] =
+      await Promise.all([
+        fetchFromMediaRedirect(shortcode),
+        fetchFromEmbed(shortcode),
+        fetchFromJsonEndpoint(shortcode),
+        fetchFromOembed(shortcode),
+      ]);
 
     console.log(
-      `Raw results for ${shortcode}: embed=${embedImages.length}, json=${jsonImages.length}, oembed=${oembedImages.length}`
+      `Results: media=${mediaImages.length}, embed=${embedImages.length}, json=${jsonImages.length}, oembed=${oembedImages.length}`
     );
 
-    // Merge and deduplicate
+    // Merge and deduplicate (prioritize JSON > media > embed > oembed)
     const seen = new Set();
     const uniqueImages = [];
-    // Prioritize JSON (highest quality) > embed > oembed
-    for (const img of [...jsonImages, ...embedImages, ...oembedImages]) {
+    for (const img of [
+      ...jsonImages,
+      ...mediaImages,
+      ...embedImages,
+      ...oembedImages,
+    ]) {
       if (!seen.has(img)) {
         seen.add(img);
         uniqueImages.push(img);
@@ -367,37 +453,18 @@ app.post("/api/fetch-images", async (req, res) => {
     }
 
     if (uniqueImages.length === 0) {
+      // Reset cookies and try again next time — they may have expired
+      cookiesInitialized = false;
+      cookieJar = {};
+
       return res.status(404).json({
         error:
-          "No images found. The post may be private, a video-only post, or Instagram may be blocking the request.",
+          "No images found. The post may be private, a video-only post, or Instagram may be blocking the request. Try again — cookies have been refreshed.",
       });
     }
 
-    // Verify images actually load (HEAD request) — filter out broken ones
-    const verifyResults = await Promise.all(
-      uniqueImages.map(async (imgUrl) => {
-        const valid = await verifyImage(imgUrl);
-        if (!valid) console.log(`  Filtered out (invalid): ${imgUrl.substring(0, 80)}...`);
-        return { url: imgUrl, valid };
-      })
-    );
-
-    const validImages = verifyResults
-      .filter((r) => r.valid)
-      .map((r) => r.url);
-
-    console.log(
-      `Verified: ${validImages.length}/${uniqueImages.length} images valid for ${shortcode}`
-    );
-
-    if (validImages.length === 0) {
-      // If verification filtered everything, return unverified as fallback
-      // (HEAD might be blocked while GET works)
-      console.log("All images failed HEAD check, returning unverified as fallback");
-      return res.json({ images: uniqueImages.slice(0, 10) });
-    }
-
-    res.json({ images: validImages });
+    console.log(`Returning ${uniqueImages.length} images`);
+    res.json({ images: uniqueImages });
   } catch (err) {
     console.error("Fetch error:", err.message);
     res.status(500).json({ error: `Failed to fetch post: ${err.message}` });
@@ -436,16 +503,19 @@ app.get("/api/proxy-image", async (req, res) => {
   }
 
   try {
-    const response = await fetchUrl(url, {
-      Referer: "https://www.instagram.com/",
-      Origin: "https://www.instagram.com",
-      Accept:
-        "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    const response = await fetchWithCookies(url, {
+      extraHeaders: {
+        Referer: "https://www.instagram.com/",
+        Accept:
+          "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Sec-Fetch-Dest": "image",
+        "Sec-Fetch-Mode": "no-cors",
+        "Sec-Fetch-Site": "cross-site",
+      },
     });
 
     const contentType = response.headers["content-type"] || "image/jpeg";
 
-    // If the CDN returned HTML or a tiny response, it's not an image
     if (contentType.includes("text/html") || response.body.length < 1000) {
       console.error(
         `Proxy: not an image — status=${response.status}, type=${contentType}, size=${response.body.length}`
