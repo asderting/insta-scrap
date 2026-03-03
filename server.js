@@ -171,6 +171,43 @@ function isPostImage(url) {
   return true;
 }
 
+/**
+ * Extract a fingerprint from a CDN URL for deduplication.
+ * Instagram CDN URLs look like:
+ *   https://scontent-xxx.cdninstagram.com/v/t51.29350-15/HASH_n.jpg?...
+ * The unique part is the filename (HASH_n.jpg). Different strategies may
+ * return URLs with different CDN hostnames or query params for the same image.
+ */
+function imageFingerprint(url) {
+  try {
+    const parsed = new URL(url);
+    // Get the last path segment (filename)
+    const parts = parsed.pathname.split("/");
+    const filename = parts[parts.length - 1];
+    // Strip file extension and return as key
+    return filename.replace(/\.[^.]+$/, "");
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Deduplicate images by CDN filename. Keeps the first (highest priority) URL
+ * for each unique image.
+ */
+function deduplicateImages(urls) {
+  const seen = new Map(); // fingerprint -> url
+  const result = [];
+  for (const url of urls) {
+    const fp = imageFingerprint(url);
+    if (!seen.has(fp)) {
+      seen.set(fp, url);
+      result.push(url);
+    }
+  }
+  return result;
+}
+
 // --- Extraction strategies ---
 
 /**
@@ -314,16 +351,9 @@ async function fetchFromJsonEndpoint(shortcode) {
     // items[] format
     if (data?.items) {
       for (const item of data.items) {
-        if (item.image_versions2?.candidates) {
-          const best = item.image_versions2.candidates.reduce((a, b) =>
-            (a.width || 0) > (b.width || 0) ? a : b
-          );
-          if (best?.url) {
-            const url = sanitizeUrl(best.url);
-            if (url) images.push(url);
-          }
-        }
         if (item.carousel_media) {
+          // Carousel post: extract each slide's image (skip top-level image_versions2
+          // because it's just the cover/first image, same as carousel_media[0])
           for (const cm of item.carousel_media) {
             if (cm.image_versions2?.candidates) {
               const best = cm.image_versions2.candidates.reduce((a, b) =>
@@ -335,6 +365,15 @@ async function fetchFromJsonEndpoint(shortcode) {
               }
             }
           }
+        } else if (item.image_versions2?.candidates) {
+          // Single image post
+          const best = item.image_versions2.candidates.reduce((a, b) =>
+            (a.width || 0) > (b.width || 0) ? a : b
+          );
+          if (best?.url) {
+            const url = sanitizeUrl(best.url);
+            if (url) images.push(url);
+          }
         }
       }
     }
@@ -342,17 +381,18 @@ async function fetchFromJsonEndpoint(shortcode) {
     // graphql format
     const media = data?.graphql?.shortcode_media;
     if (media) {
-      if (media.display_url) {
-        const url = sanitizeUrl(media.display_url);
-        if (url) images.push(url);
-      }
-      if (media.edge_sidecar_to_children?.edges) {
+      if (media.edge_sidecar_to_children?.edges?.length > 0) {
+        // Carousel: get each slide (skip top-level display_url, it's the cover)
         for (const edge of media.edge_sidecar_to_children.edges) {
           if (edge.node?.display_url) {
             const url = sanitizeUrl(edge.node.display_url);
             if (url) images.push(url);
           }
         }
+      } else if (media.display_url) {
+        // Single image
+        const url = sanitizeUrl(media.display_url);
+        if (url) images.push(url);
       }
     }
   } catch (err) {
@@ -437,20 +477,17 @@ app.post("/api/fetch-images", async (req, res) => {
       `Results: media=${mediaImages.length}, embed=${embedImages.length}, json=${jsonImages.length}, oembed=${oembedImages.length}`
     );
 
-    // Merge and deduplicate (prioritize JSON > media > embed > oembed)
-    const seen = new Set();
-    const uniqueImages = [];
-    for (const img of [
+    // Merge and deduplicate by CDN filename fingerprint
+    // Prioritize JSON (has all carousel images) > media > embed > oembed
+    const allImages = [
       ...jsonImages,
       ...mediaImages,
       ...embedImages,
       ...oembedImages,
-    ]) {
-      if (!seen.has(img)) {
-        seen.add(img);
-        uniqueImages.push(img);
-      }
-    }
+    ];
+    const uniqueImages = deduplicateImages(allImages);
+
+    console.log(`After dedup: ${uniqueImages.length} unique (from ${allImages.length} total)`);
 
     if (uniqueImages.length === 0) {
       // Reset cookies and try again next time — they may have expired
