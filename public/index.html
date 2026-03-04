@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Insta-Scrap</title>
+    <title>Insta-Scrap — Instagram Image Downloader</title>
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -11,85 +11,99 @@
       <header>
         <h1>Insta-Scrap</h1>
         <p class="subtitle">
-          Paste an Instagram post link to view, download, or drag &amp; drop
-          images
+          Paste an Instagram link &mdash; images download instantly
         </p>
       </header>
 
       <form id="url-form">
         <div class="input-group">
           <div class="input-wrapper">
+            <svg class="input-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"/><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"/><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"/></svg>
             <input
               type="url"
               id="url-input"
-              placeholder="https://www.instagram.com/p/ABC123/"
+              placeholder="Paste Instagram link here..."
               required
               autocomplete="off"
             />
             <button type="button" id="paste-btn" class="paste-btn" title="Paste from clipboard">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="15" y2="16"/></svg>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="4" rx="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/></svg>
               Paste
             </button>
           </div>
           <button type="submit" id="fetch-btn">
-            <span class="btn-text">Fetch Images</span>
+            <span class="btn-text">Download</span>
             <span class="btn-spinner hidden"></span>
           </button>
         </div>
-        <p class="hint">Supports /p/, /reel/, and /tv/ links</p>
+        <p class="hint">Supports posts, reels, and IGTV links &bull; Auto-fetches on paste</p>
       </form>
 
-      <!-- Session setup for carousel support -->
-      <div id="session-panel" class="session-panel">
-        <button type="button" id="session-toggle" class="session-toggle">
+      <!-- Settings gear for session -->
+      <div id="settings-bar" class="settings-bar">
+        <button type="button" id="session-toggle" class="settings-btn" title="Session settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           <span id="session-indicator" class="indicator indicator-off"></span>
-          Session
         </button>
-        <div id="session-form" class="session-form hidden">
-          <p class="session-info">
-            To get <strong>all images from carousel posts</strong>, paste your Instagram <code>sessionid</code> cookie:
-          </p>
-          <ol class="session-steps">
-            <li>Open <strong>instagram.com</strong> in your browser and log in</li>
-            <li>Press <strong>F12</strong> &rarr; Application &rarr; Cookies &rarr; instagram.com</li>
-            <li>Find <code>sessionid</code> and copy its <strong>Value</strong></li>
-          </ol>
-          <div class="session-input-group">
-            <input type="text" id="session-input" placeholder="Paste sessionid value here" autocomplete="off" />
-            <button type="button" id="session-save" class="btn-secondary">Save</button>
-            <button type="button" id="session-clear" class="btn-secondary">Clear</button>
-          </div>
+      </div>
+
+      <!-- Session panel (hidden by default) -->
+      <div id="session-form" class="session-form hidden">
+        <p class="session-info">
+          For <strong>carousel posts</strong> (multi-image), paste your Instagram <code>sessionid</code> cookie:
+        </p>
+        <ol class="session-steps">
+          <li>Open <strong>instagram.com</strong> and log in</li>
+          <li>Press <strong>F12</strong> &rarr; Application &rarr; Cookies &rarr; instagram.com</li>
+          <li>Copy the <code>sessionid</code> value</li>
+        </ol>
+        <div class="session-input-group">
+          <input type="text" id="session-input" placeholder="Paste sessionid here" autocomplete="off" />
+          <button type="button" id="session-save" class="btn-small">Save</button>
+          <button type="button" id="session-clear" class="btn-small btn-muted">Clear</button>
         </div>
       </div>
 
       <div id="error-msg" class="error hidden"></div>
 
+      <!-- Loading skeleton -->
+      <div id="loading-skeleton" class="skeleton-grid hidden">
+        <div class="skeleton-card"><div class="skeleton-img"></div><div class="skeleton-bar"></div></div>
+        <div class="skeleton-card"><div class="skeleton-img"></div><div class="skeleton-bar"></div></div>
+        <div class="skeleton-card"><div class="skeleton-img"></div><div class="skeleton-bar"></div></div>
+      </div>
+
       <div id="results" class="results hidden">
         <div class="results-header">
           <span id="image-count"></span>
-          <button id="download-all-btn" class="btn-secondary">
-            Download All
-          </button>
+          <div class="results-actions">
+            <button id="download-all-btn" class="btn-primary-sm">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Download All
+            </button>
+          </div>
         </div>
         <div id="image-grid" class="image-grid"></div>
       </div>
     </div>
 
-    <!-- Lightbox overlay for full-size viewing -->
+    <!-- Lightbox overlay -->
     <div id="lightbox" class="lightbox hidden">
       <button id="lightbox-close" class="lightbox-close">&times;</button>
-      <button id="lightbox-prev" class="lightbox-nav lightbox-prev-btn">
-        &#8249;
-      </button>
-      <button id="lightbox-next" class="lightbox-nav lightbox-next-btn">
-        &#8250;
-      </button>
+      <button id="lightbox-prev" class="lightbox-nav lightbox-prev-btn">&#8249;</button>
+      <button id="lightbox-next" class="lightbox-nav lightbox-next-btn">&#8250;</button>
       <img id="lightbox-img" src="" alt="Full size" />
       <div class="lightbox-footer">
         <span id="lightbox-counter"></span>
-        <button id="lightbox-download" class="btn-secondary">Download</button>
+        <button id="lightbox-download" class="btn-primary-sm">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download
+        </button>
       </div>
     </div>
+
+    <!-- Toast notification -->
+    <div id="toast" class="toast hidden"></div>
 
     <script src="app.js"></script>
   </body>

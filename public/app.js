@@ -15,19 +15,46 @@ const lightboxPrev = document.getElementById("lightbox-prev");
 const lightboxNext = document.getElementById("lightbox-next");
 const lightboxCounter = document.getElementById("lightbox-counter");
 const lightboxDownload = document.getElementById("lightbox-download");
+const loadingSkeleton = document.getElementById("loading-skeleton");
+const toast = document.getElementById("toast");
 
 let currentImages = [];
 let lightboxIndex = 0;
+let isFetching = false;
+
+// --- Instagram URL detection ---
+const instaRegex = /^https?:\/\/(www\.)?instagram\.com\/(p|reel|tv)\/[\w-]+/i;
+
+function isInstagramUrl(text) {
+  return instaRegex.test(text.trim());
+}
+
+// --- Auto-fetch on paste ---
+urlInput.addEventListener("paste", (e) => {
+  // Use setTimeout so the input value is updated after paste
+  setTimeout(() => {
+    const text = urlInput.value.trim();
+    if (isInstagramUrl(text) && !isFetching) {
+      fetchImages(text);
+    }
+  }, 50);
+});
 
 // --- Form Submit ---
-urlForm.addEventListener("submit", async (e) => {
+urlForm.addEventListener("submit", (e) => {
   e.preventDefault();
   const url = urlInput.value.trim();
-  if (!url) return;
+  if (!url || isFetching) return;
+  fetchImages(url);
+});
+
+async function fetchImages(url) {
+  if (isFetching) return;
 
   setLoading(true);
   hideError();
   results.classList.add("hidden");
+  loadingSkeleton.classList.remove("hidden");
 
   try {
     const res = await fetch("/api/fetch-images", {
@@ -49,8 +76,9 @@ urlForm.addEventListener("submit", async (e) => {
     showError("Network error. Please check your connection and try again.");
   } finally {
     setLoading(false);
+    loadingSkeleton.classList.add("hidden");
   }
-});
+}
 
 // --- Render Images ---
 function renderImages(images) {
@@ -65,60 +93,101 @@ function renderImages(images) {
 
     const img = document.createElement("img");
     img.src = proxyUrl;
-    img.alt = `Post image ${index + 1}`;
+    img.alt = `Image ${index + 1}`;
     img.loading = "lazy";
     img.draggable = true;
 
-    // Hide card if the image fails to load (broken/blank)
+    // Hide card if the image fails to load
     img.addEventListener("error", () => {
       card.remove();
-      // Remove from currentImages so lightbox/download skip it
       currentImages = currentImages.filter((_, i) => i !== index);
       updateImageCount();
     });
 
-    // Enable drag-and-drop as a file
+    // Click image to open lightbox
+    img.addEventListener("click", () => openLightbox(index));
+
+    // Drag-and-drop
     img.addEventListener("dragstart", (e) => {
       e.dataTransfer.setData("text/uri-list", proxyUrl);
       e.dataTransfer.setData("text/plain", proxyUrl);
       e.dataTransfer.effectAllowed = "copy";
     });
 
-    const dragHint = document.createElement("div");
-    dragHint.className = "drag-hint";
-    dragHint.textContent = "Drag to use";
+    // Overlay
+    const overlay = document.createElement("div");
+    overlay.className = "card-overlay";
 
+    // Badge (image number)
+    const badge = document.createElement("div");
+    badge.className = "card-badge";
+    badge.textContent = `${index + 1} / ${images.length}`;
+
+    // Actions
     const actions = document.createElement("div");
     actions.className = "card-actions";
 
+    const dlBtn = document.createElement("button");
+    dlBtn.className = "card-btn-download";
+    dlBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download`;
+    dlBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      downloadImage(proxyUrl, index);
+    });
+
     const viewBtn = document.createElement("button");
+    viewBtn.className = "card-btn-view";
     viewBtn.textContent = "View";
     viewBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       openLightbox(index);
     });
 
-    const dlBtn = document.createElement("button");
-    dlBtn.textContent = "Download";
-    dlBtn.addEventListener("click", (e) => {
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "card-btn-copy";
+    copyBtn.textContent = "Copy";
+    copyBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      downloadImage(proxyUrl, index);
+      copyToClipboard(originalUrl);
     });
 
-    actions.appendChild(viewBtn);
     actions.appendChild(dlBtn);
+    actions.appendChild(viewBtn);
+    actions.appendChild(copyBtn);
+
+    overlay.appendChild(badge);
+    overlay.appendChild(actions);
 
     card.appendChild(img);
-    card.appendChild(dragHint);
-    card.appendChild(actions);
-
-    // Click card to open lightbox
-    card.addEventListener("click", () => openLightbox(index));
-
+    card.appendChild(overlay);
     imageGrid.appendChild(card);
   });
 
   results.classList.remove("hidden");
+}
+
+// --- Copy to clipboard ---
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(
+    () => showToast("Link copied to clipboard"),
+    () => showToast("Failed to copy")
+  );
+}
+
+// --- Toast ---
+let toastTimer = null;
+function showToast(msg) {
+  toast.textContent = msg;
+  toast.classList.remove("hidden");
+  // Force reflow for animation
+  toast.offsetHeight;
+  toast.classList.add("show");
+
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.classList.remove("show");
+    setTimeout(() => toast.classList.add("hidden"), 300);
+  }, 2000);
 }
 
 // --- Download ---
@@ -136,6 +205,7 @@ downloadAllBtn.addEventListener("click", () => {
     const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(originalUrl)}`;
     setTimeout(() => downloadImage(proxyUrl, index), index * 300);
   });
+  showToast(`Downloading ${currentImages.length} images...`);
 });
 
 // --- Lightbox ---
@@ -190,7 +260,7 @@ lightboxDownload.addEventListener("click", (e) => {
   downloadImage(proxyUrl, lightboxIndex);
 });
 
-// Keyboard navigation for lightbox
+// Keyboard nav
 document.addEventListener("keydown", (e) => {
   if (lightbox.classList.contains("hidden")) return;
   if (e.key === "Escape") closeLightbox();
@@ -206,8 +276,9 @@ document.addEventListener("keydown", (e) => {
 
 // --- UI Helpers ---
 function setLoading(loading) {
+  isFetching = loading;
   fetchBtn.disabled = loading;
-  btnText.textContent = loading ? "Fetching..." : "Fetch Images";
+  btnText.textContent = loading ? "Fetching..." : "Download";
   btnSpinner.classList.toggle("hidden", !loading);
 }
 
@@ -237,6 +308,10 @@ pasteBtn.addEventListener("click", async () => {
     const text = await navigator.clipboard.readText();
     urlInput.value = text;
     urlInput.focus();
+    // Auto-fetch if it's an Instagram URL
+    if (isInstagramUrl(text) && !isFetching) {
+      fetchImages(text);
+    }
   } catch {
     urlInput.value = "";
     urlInput.focus();
@@ -256,7 +331,9 @@ sessionToggle.addEventListener("click", () => {
 });
 
 function setSessionIndicator(active) {
-  sessionIndicator.className = active ? "indicator indicator-on" : "indicator indicator-off";
+  sessionIndicator.className = active
+    ? "indicator indicator-on"
+    : "indicator indicator-off";
 }
 
 sessionSave.addEventListener("click", async () => {
@@ -273,6 +350,7 @@ sessionSave.addEventListener("click", async () => {
       setSessionIndicator(true);
       sessionInput.value = "";
       sessionForm.classList.add("hidden");
+      showToast("Session saved — carousel posts enabled");
     }
   } catch {}
 });
@@ -286,6 +364,7 @@ sessionClear.addEventListener("click", async () => {
     });
     setSessionIndicator(false);
     sessionInput.value = "";
+    showToast("Session cleared");
   } catch {}
 });
 
